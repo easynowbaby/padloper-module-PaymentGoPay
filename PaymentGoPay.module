@@ -1,0 +1,337 @@
+<?php
+
+/**
+ * 
+ * GoPay payment module for ProcessWire
+ * 2015 - David Cerny
+ * 
+ * 
+ * 
+ * 
+ * 
+ */
+
+
+
+class PaymentGoPay extends PaymentModule {
+    
+    private $json = '{"payer":{"default_payment_instrument":"BANK_ACCOUNT","allowed_payment_instruments":["BANK_ACCOUNT"],"default_swift":"FIOBCZPP","contact":{"first_name":"Zbynek","last_name":"Zak","email":"zbynek.zak@gopay.cz","phone_number":"+420777456123","city":"C.Budejovice","street":"Plana 67","postal_code":"373 01","country_code":"CZE"}},"target":{"type":"ACCOUNT","goid":"8123456789"},"amount":"1000","currency":"CZK","order_number":"001","order_description":"pojisteni01","callback":{"return_url":"http:\/\/www.eshop.cz\/return","notification_url":"http:\/\/www.eshop.cz\/notify"},"lang":"cs"}';
+
+    private $username;
+    private $password;    
+    private $goid;
+
+    private $tokenUrl;
+    private $paymentUrl;
+    private $statusUrl;
+
+    private $default_payment_instrument = "BANK_ACCOUNT"; 
+    private $allowed_payment_instruments = ["PAYMENT_CARD", "BANK_ACCOUNT", "MPAYMENT", "GOPAY", "PRSMS"];
+    private $default_swift = "GIBACZPX";    
+    private $lang = 'CS';
+     
+
+    public static function getModuleInfo() {
+    	return array(
+    		'title' => 'PaymentGoPay', 
+    		'version' => 001, 
+    		'summary' => 'Inline platební brána GoPay',
+    		'singular' => false,
+    		'autoload' => false, 
+        'requires' => 'PaymentModule'
+    		);
+    }
+    	
+    public function init() {      
+    	$this->password = $this->data[password];
+      $this->username = $this->data[username];
+      $this->goid = $this->data[goid];
+      $this->tokenUrl = $this->data[tokenUrl];
+      $this->paymentUrl = $this->data[paymentUrl];
+      $this->statusUrl = $this->data[statusUrl];
+    }
+
+    public function getTitle() {
+      return $this->_("GoPay");
+    }
+
+    public function processPayment() {
+      if (isset($_GET['id'])) {              
+        $status = $this->getPaymentStatus($_GET['id']);
+        return $status; 
+      }
+      else {
+        return false;
+      }      
+    }
+
+    public function render() {      
+
+      if ($this->getTotalAmount() <= 0) throw new WireException("Products are not set");
+      if ($this->processUrl == '') throw new WireException("processUrl is not set");        
+
+      $url = $this->insertPayment();           
+      $formTemplate = new TemplateFile(__DIR__ . DIRECTORY_SEPARATOR . "pay_button.php");
+      $formTemplate->set("url", $url);  
+      return $formTemplate->render();
+
+    }
+
+    public function getToken() {
+
+      try {
+
+        $ch = curl_init();
+
+        if (FALSE === $ch)
+            throw new Exception('failed to initialize');
+
+        curl_setopt($ch, CURLOPT_URL, $this->tokenUrl);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, array(
+        "Accept: application/json",
+        "Content-Type: application/x-www-form-urlencoded"
+        ));
+        curl_setopt($ch, CURLOPT_VERBOSE, 1);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_POST, true);  // tell curl you want to post something
+        curl_setopt($ch, CURLOPT_POSTFIELDS, "grant_type=client_credentials&scope=payment-create"); // define what you want to post
+        curl_setopt($ch, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+        curl_setopt($ch, CURLOPT_USERPWD, $this->username . ':' . $this->password);     
+        curl_setopt($ch, CURLOPT_CAINFO, dirname(__FILE__) . '/cert/cacert.pem'); //certificate
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);          
+
+        $content = $this->objectToArray(json_decode(curl_exec($ch))); // execute 
+        
+        if ($content != false) {
+          return $content["access_token"];
+        }
+        else {
+          throw new Exception(curl_error($ch), curl_errno($ch));
+          echo 'error';
+        }          
+
+      } catch(Exception $e) {
+
+        trigger_error(sprintf(
+        'Curl failed with error #%d: %s',
+        $e->getCode(), $e->getMessage()),
+        E_USER_ERROR);
+
+      }
+
+  }
+
+  public function insertPayment() {
+
+    $accessToken = $this->getToken();
+    $json = $this->populateJson();
+
+    try {
+
+      $ch = curl_init();
+
+      if (FALSE === $ch)
+          throw new Exception('failed to initialize'); 
+
+      curl_setopt($ch, CURLOPT_URL, $this->paymentUrl);
+      curl_setopt($ch, CURLOPT_HTTPHEADER, array(
+      "Accept: application/json",
+      "Content-Type: application/json",
+      "Authorization: Bearer " . $accessToken
+      ));
+      curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+      curl_setopt($ch, CURLOPT_POST, true);  // tell curl you want to post something
+      curl_setopt($ch, CURLOPT_POSTFIELDS, $json); // define what you want to post
+      curl_setopt($ch, CURLOPT_CAINFO, dirname(__FILE__) . '\cert\cacert.pem'); //certificate
+      curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+
+      $content = (curl_exec($ch)); // execute 
+
+      if (FALSE === $content) {
+        throw new Exception(curl_error($ch), curl_errno($ch));
+      }
+      else {
+        $arr = $this->objectToArray(json_decode($content));
+        return $arr[gw_url];       
+      }
+
+    } catch(Exception $e) {
+
+      trigger_error(sprintf(
+          'Curl failed with error #%d: %s',
+          $e->getCode(), $e->getMessage()),
+          E_USER_ERROR);
+
+    }
+
+  }
+
+  public function populateJson() {
+
+    // convert json to array
+    $arr = $this->objectToArray(json_decode($this->json));    
+
+    // payment options
+    $arr['payer']['default_payment_instrument'] = $this->default_payment_instrument; 
+    $arr['payer']['allowed_payment_instruments'] = $this->allowed_payment_instruments; // array or string
+    $arr['payer']['default_swift'] = $this->default_swift; 
+
+    // contact info
+    $arr['payer']['contact']['first_name'] = $this->customer->givenName;
+    $arr['payer']['contact']['last_name'] = $this->customer->familyName;
+    $arr['payer']['contact']['email'] = $this->customer->email;
+    //$arr['payer']['contact']['phone_number'] = $this->customer->locality;
+    $arr['payer']['contact']['city'] = $this->customer->locality;
+    $arr['payer']['contact']['street'] = $this->customer->streetAddress;
+    $arr['payer']['contact']['postal_code'] = $this->customer->postalCode;
+    // $arr['payer']['contact']['country_code'] = $this->customer['country_code'];
+
+    // target
+    $arr['target']['type'] = 'ACCOUNT';
+    $arr['target']['goid'] = $this->goid;
+
+    // amount    
+    $arr['amount'] = $this->getTotal(); 
+
+    // currency
+    $arr['currency'] = $this->currency;
+
+    // order number
+    $arr['order_number'] = $this->id;
+
+    // order description
+    $arr['order_description'] = 'order'; //TODO: decide what should be here
+
+    // return urls
+    $arr['callback']['return_url'] = $this->processUrl;    
+    $arr['callback']['notification_url'] = $this->notifyUrl;
+
+    // language
+    $arr['lang'] = $this->lang;
+    
+    return json_encode($arr);   
+
+  }
+
+  public function getPaymentStatus($id) {
+
+    $accessToken = $this->getToken();         
+
+    try {
+
+      $ch = curl_init();
+
+      if (FALSE === $ch)
+          throw new Exception('failed to initialize'); 
+
+      curl_setopt($ch, CURLOPT_URL, $this->statusUrl . $id);
+      curl_setopt($ch, CURLOPT_HTTPHEADER, array(
+      "Accept: application/json",
+      "Content-Type: application/x-www-form-urlencoded",
+      "Authorization: Bearer " . $accessToken
+      ));
+      curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);     
+      curl_setopt($ch, CURLOPT_CAINFO, dirname(__FILE__) . '\cert\cacert.pem'); //certificate
+      curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+
+      if (isset($_GET)) {
+
+        $content = $this->objectToArray(json_decode(curl_exec($ch))); // execute
+
+        if (FALSE === $content) {
+          throw new Exception(curl_error($ch), curl_errno($ch));
+        }
+        else {          
+          return $content['state'];             
+        }
+        
+      }
+      elseif (isset($_POST)) {
+
+        $content = (curl_exec($ch)); // execute
+
+        if (FALSE === $content) {
+          throw new Exception(curl_error($ch), curl_errno($ch));
+        }
+        else {
+          echo $content;
+        }
+
+      }  
+
+    } catch(Exception $e) {
+
+      trigger_error(sprintf(
+          'Curl failed with error #%d: %s',
+          $e->getCode(), $e->getMessage()),
+          E_USER_ERROR);
+    }
+
+  }
+
+  public function getTotal() {
+    $total;
+    foreach($this->products as $p) {
+      $total += $p->total;
+    }  
+    return $total;
+  }   
+
+  public function objectToArray($d) {
+    if (is_object($d)) {        
+      $d = get_object_vars($d);
+    }
+    if (is_array($d)) {       
+      return array_map(array($this, 'objectToArray'), $d);    
+    }
+    else {        
+      return $d;
+    }
+  }   
+
+	public static function getModuleConfigInputfields(array $data) {
+
+    	$inputfields = new InputfieldWrapper(); 
+
+        $field = wire('modules')->get('InputfieldText');
+        $field->name = 'username';
+        $field->label = __("Client ID");
+        $field->notes = __("Username");
+        if(isset($data['username'])) $field->value = $data['username'];
+        $inputfields->add($field);
+
+        $field = wire('modules')->get('InputfieldText');
+        $field->name = 'password';
+        $field->label = __("Client secret");
+        $field->notes = __("Password");
+        if(isset($data['password'])) $field->value = $data['password'];
+        $inputfields->add($field);
+        
+        $field = wire('modules')->get('InputfieldText');
+        $field->name = 'goid';
+        $field->label = __("GO ID");        
+        if(isset($data['goid'])) $field->value = $data['goid'];
+        $inputfields->add($field);
+
+        $field = wire('modules')->get('InputfieldText');
+        $field->name = 'tokenUrl';
+        $field->label = __("Token URL");        
+        if(isset($data['tokenUrl'])) $field->value = $data['tokenUrl'];
+        $inputfields->add($field);
+
+        $field = wire('modules')->get('InputfieldText');
+        $field->name = 'paymentUrl';
+        $field->label = __("Payment URL");        
+        if(isset($data['paymentUrl'])) $field->value = $data['paymentUrl'];
+        $inputfields->add($field);
+
+        $field = wire('modules')->get('InputfieldText');
+        $field->name = 'statusUrl';
+        $field->label = __("Status URL");        
+        if(isset($data['statusUrl'])) $field->value = $data['statusUrl'];
+        $inputfields->add($field);       
+
+
+		return $inputfields;
+	}
+}
